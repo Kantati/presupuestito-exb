@@ -5,6 +5,8 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend
 } from "recharts";
 
+import AsistenteFlotante from "./AsistenteFlotante";
+
 const API_URL = "http://127.0.0.1:8000";
 
 const REPORTES = {
@@ -465,6 +467,14 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      <AsistenteFlotante
+     apiUrl={API_URL}
+     reporte={reporte}
+     moneda={moneda}
+     filas={filas}
+   />
+ 
     </>
   );
 }

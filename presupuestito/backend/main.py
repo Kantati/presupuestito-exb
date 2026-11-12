@@ -11,6 +11,15 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
+import os
+import json
+from pathlib import Path
+from dotenv import load_dotenv
+from google import genai
+
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
 DATABASE_URL = "postgresql+psycopg://postgres:Kantati@localhost:5432/control_presupuestario"
 engine = create_engine(DATABASE_URL)
 SECRET_KEY = "hackathon_exb_secreto"
@@ -352,3 +361,40 @@ def descargar_pdf(
     doc.build(elementos)
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={titulo}_{moneda}.pdf"})
+
+@app.post("/api/ia/analizar")
+def analizar_con_ia(datos: dict):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Falta configurar GEMINI_API_KEY en el archivo .env")
+
+    pregunta = datos.get("pregunta", "").strip()
+    reporte = datos.get("reporte", "Reporte general")
+    moneda = datos.get("moneda", "BOB")
+    filas = datos.get("filas", [])[:40]  # Enviamos las primeras 40 filas para respuesta rápida
+
+    if not pregunta:
+        raise HTTPException(status_code=400, detail="Escribe una pregunta")
+
+    prompt = f"""
+    Eres el Analista Financiero IA de Enseña por Bolivia.
+    Responde de forma clara, ejecutiva y directa en español basándote ÚNICAMENTE en los siguientes datos del reporte actual.
+    Si los datos no alcanzan para responder algo, indícalo sin inventar cifras.
+
+    - Reporte consultado: {reporte}
+    - Moneda: {moneda}
+    - Datos actuales (JSON):
+    {json.dumps(filas, ensure_ascii=False)}
+
+    Pregunta del usuario: {pregunta}
+    """
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+        return {"respuesta": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al consultar Gemini: {str(e)}")
