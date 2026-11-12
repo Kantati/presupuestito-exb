@@ -29,7 +29,11 @@ app = FastAPI(title="API Control Presupuestario EXB")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://presupuestito-exb.vercel.app",
+    ],
+    allow_origin_regex=r"https://presupuestito-.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
