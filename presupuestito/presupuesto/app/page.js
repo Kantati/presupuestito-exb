@@ -5,7 +5,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend
 } from "recharts";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_URL = "http://127.0.0.1:8000";
 
 const REPORTES = {
   "Ejecución por rubro y cuenta": "rubro,cuenta",
@@ -13,8 +13,8 @@ const REPORTES = {
   "Ejecución por área y financiador": "area,financiador",
   "Ejecución por región": "region",
   "Ejecución por mes": "mes",
+  "Comparativo por gestión": "gestion",
   "Detalle de movimientos": "fecha,rubro,cuenta,financiador,area,region,glosa",
-  "Resumen general consolidado": "gestion",
 };
 
 const fmt = (n) =>
@@ -31,10 +31,14 @@ export default function Home() {
   const [cargando, setCargando] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // Drill-down (Detalle desplegable al hacer clic en una fila)
-  const [detalleSeleccionado, setDetalleSeleccionado] = useState(null);
-  const [filasDetalle, setFilasDetalle] = useState([]);
+  // Detalle desplegable (Drill-Down)
+  const [filaSeleccionada, setFilaSeleccionada] = useState(null);
+  const [detalleMovs, setDetalleMovs] = useState([]);
   const [cargandoDetalle, setCargandoDetalle] = useState(false);
+
+  // Auditoría de cargas
+  const [mostrarAuditoria, setMostrarAuditoria] = useState(false);
+  const [auditoria, setAuditoria] = useState([]);
 
   // Autenticación
   const [token, setToken] = useState("");
@@ -42,7 +46,7 @@ export default function Home() {
   const [mostrarLogin, setMostrarLogin] = useState(false);
   const [credenciales, setCredenciales] = useState({ email: "", password: "" });
 
-  const simbolo = moneda === "USD" ? "USD" : "Bs";
+  const simbolo = moneda === "USD" ? "$us" : "Bs";
 
   useEffect(() => {
     const savedToken = localStorage.getItem("exb_token");
@@ -99,7 +103,8 @@ export default function Home() {
     setCargando(false);
     if (r.ok) {
       setMsg(`✔ Base actualizada: ${j.importados} registros procesados`);
-      ver(reporte, moneda);
+      ver();
+      if (mostrarAuditoria) cargarAuditoria();
     } else {
       setMsg(`❌ Error: ${j.detail || "No autorizado"}`);
     }
@@ -113,67 +118,65 @@ export default function Home() {
     });
     if (r.ok) {
       setFilas([]);
-      setDetalleSeleccionado(null);
+      setFilaSeleccionada(null);
       setMsg("✔ Base de datos vaciada");
     }
   }
 
   async function ver(repSeleccionado = reporte, monSeleccionada = moneda) {
     setCargando(true);
-    setDetalleSeleccionado(null);
-    const q = new URLSearchParams({
-      agrupar: REPORTES[repSeleccionado],
-      moneda: monSeleccionada,
-    });
+    setFilaSeleccionada(null);
+    const q = new URLSearchParams({ agrupar: REPORTES[repSeleccionado], moneda: monSeleccionada });
     for (const k in filtros) if (filtros[k]) q.set(k, filtros[k]);
     try {
       const r = await fetch(`${API_URL}/api/reportes?` + q);
       const data = await r.json();
       setFilas(Array.isArray(data) ? data : []);
     } catch {
-      setMsg("❌ No se pudo conectar con el servidor FastAPI");
+      setMsg("❌ No se pudo conectar con el servidor FastAPI (puerto 8000)");
     }
     setCargando(false);
   }
 
-  async function abrirDetalle(fila) {
+  async function abrirDetalleFila(fila, idx) {
     if (reporte === "Detalle de movimientos") return;
-    const q = new URLSearchParams({ moneda });
-    for (const k of ["rubro", "cuenta", "financiador", "region", "area", "mes", "gestion"]) {
-      if (fila[k] !== undefined && fila[k] !== null) q.set(k, fila[k]);
-      else if (filtros[k]) q.set(k, filtros[k]);
+    if (filaSeleccionada === idx) {
+      setFilaSeleccionada(null);
+      return;
     }
-    const etiqueta = Object.keys(fila)
-      .filter((c) => !["presupuesto", "ejecutado", "saldo", "porcentaje"].includes(c))
-      .map((c) => fila[c])
-      .join(" · ");
-
-    setDetalleSeleccionado(etiqueta);
+    setFilaSeleccionada(idx);
     setCargandoDetalle(true);
+    const q = new URLSearchParams({ moneda });
+    for (const campo of ["rubro", "cuenta", "financiador", "area", "region", "mes", "gestion"]) {
+      if (fila[campo] !== undefined && fila[campo] !== null) {
+        q.set(campo, fila[campo]);
+      }
+    }
     const r = await fetch(`${API_URL}/api/detalle?` + q);
     const data = await r.json();
-    setFilasDetalle(Array.isArray(data) ? data : []);
+    setDetalleMovs(Array.isArray(data) ? data : []);
     setCargandoDetalle(false);
   }
 
-  function cambiarMoneda(nuevaMoneda) {
-    setMoneda(nuevaMoneda);
-    ver(reporte, nuevaMoneda);
+  async function cargarAuditoria() {
+    const nuevoEstado = !mostrarAuditoria;
+    setMostrarAuditoria(nuevoEstado);
+    if (nuevoEstado) {
+      const r = await fetch(`${API_URL}/api/auditoria`);
+      const data = await r.json();
+      setAuditoria(Array.isArray(data) ? data : []);
+    }
   }
 
   function descargarExcel() {
     const hoja = XLSX.utils.json_to_sheet(filas);
     const libro = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(libro, hoja, `Reporte_${moneda}`);
+    XLSX.utils.book_append_sheet(libro, hoja, "Reporte");
     XLSX.writeFile(libro, `${reporte}_${moneda}.xlsx`);
   }
 
   function descargarPDF() {
-    const q = new URLSearchParams({
-      titulo: reporte,
-      agrupar: REPORTES[reporte],
-      moneda,
-    });
+    const q = new URLSearchParams({ titulo: reporte, agrupar: REPORTES[reporte], moneda });
     for (const k in filtros) if (filtros[k]) q.set(k, filtros[k]);
     window.open(`${API_URL}/api/reportes/pdf?` + q, "_blank");
   }
@@ -201,50 +204,26 @@ export default function Home() {
 
   return (
     <>
-      <div className="header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+      <div className="header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <h1>Control Presupuestario y Ejecución Financiera</h1>
-          <p>Portal de Transparencia y Consulta en Tiempo Real</p>
+          <p>Portal de Transparencia y Consulta en Tiempo Real · Enseña por Bolivia</p>
         </div>
-
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          {/* Selector de Moneda BOB / USD */}
-          <div style={{ display: "flex", background: "rgba(255,255,255,0.15)", borderRadius: 8, padding: 3 }}>
-            <button
-              onClick={() => cambiarMoneda("BOB")}
-              style={{
-                background: moneda === "BOB" ? "#fff" : "transparent",
-                color: moneda === "BOB" ? "#1e3a8a" : "#fff",
-                padding: "5px 12px",
-                fontWeight: 700,
-              }}
-            >
-              BOB (Bs)
-            </button>
-            <button
-              onClick={() => cambiarMoneda("USD")}
-              style={{
-                background: moneda === "USD" ? "#fff" : "transparent",
-                color: moneda === "USD" ? "#1e3a8a" : "#fff",
-                padding: "5px 12px",
-                fontWeight: 700,
-              }}
-            >
-              USD ($)
-            </button>
-          </div>
-
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button className="sec" onClick={cargarAuditoria}>
+            📋 Historial de Cargas
+          </button>
           {!token ? (
             <button className="sec" onClick={() => setMostrarLogin(!mostrarLogin)}>
               🔒 Acceso Administrador
             </button>
           ) : (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <>
               <span style={{ fontSize: 13, background: "#dcfce7", color: "#166534", padding: "6px 10px", borderRadius: 6 }}>
                 👤 {adminNombre}
               </span>
               <button className="sec" onClick={cerrarSesion}>Salir</button>
-            </div>
+            </>
           )}
         </div>
       </div>
@@ -273,6 +252,40 @@ export default function Home() {
           </div>
         )}
 
+        {mostrarAuditoria && (
+          <div className="card" style={{ borderLeft: "4px solid #6366f1" }}>
+            <h3>Bitácora de Auditoría e Importaciones</h3>
+            {auditoria.length > 0 ? (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fecha y Hora</th>
+                    <th>Archivo Excel</th>
+                    <th>Gestión</th>
+                    <th className="num">Registros</th>
+                    <th>Responsable</th>
+                    <th>Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {auditoria.map((a) => (
+                    <tr key={a.id}>
+                      <td>{a.fecha}</td>
+                      <td>{a.nombre_archivo}</td>
+                      <td>{a.gestion}</td>
+                      <td className="num">{a.filas_procesadas}</td>
+                      <td>{a.usuario}</td>
+                      <td>✔ {a.estado}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p style={{ color: "#64748b", fontSize: 14 }}>No hay cargas registradas aún.</p>
+            )}
+          </div>
+        )}
+
         {token && (
           <div className="card" style={{ borderLeft: "4px solid #16a34a" }}>
             <h3>Panel de Administración: Carga de Base Contable (Excel)</h3>
@@ -286,7 +299,7 @@ export default function Home() {
         {msg && <div style={{ marginBottom: 12, fontWeight: 600 }}>{msg}</div>}
 
         <div className="card">
-          <h3>Consulta Dinámica de Reportes {moneda === "USD" && <span style={{ fontSize: 12, color: "#64748b" }}>(Tasa: 6.96 Bs/USD)</span>}</h3>
+          <h3>Consulta Dinámica de Reportes</h3>
           <div className="row">
             <select
               value={reporte}
@@ -299,6 +312,19 @@ export default function Home() {
                 <option key={r}>{r}</option>
               ))}
             </select>
+
+            <select
+              value={moneda}
+              onChange={(e) => {
+                setMoneda(e.target.value);
+                ver(reporte, e.target.value);
+              }}
+              style={{ fontWeight: 600, background: "#f8fafc" }}
+            >
+              <option value="BOB">Moneda: Bolivianos (Bs)</option>
+              <option value="USD">Moneda: Dólares ($us · TC 6.96)</option>
+            </select>
+
             {[
               { key: "gestion", label: "Gestión (ej. 2026)" },
               { key: "financiador", label: "Financiador" },
@@ -310,10 +336,10 @@ export default function Home() {
                 placeholder={f.label}
                 value={filtros[f.key]}
                 onChange={(e) => setFiltros({ ...filtros, [f.key]: e.target.value })}
-                style={{ width: 145 }}
+                style={{ width: 135 }}
               />
             ))}
-            <button onClick={() => ver(reporte, moneda)} disabled={cargando}>
+            <button onClick={() => ver()} disabled={cargando}>
               {cargando ? "Cargando..." : "Consultar"}
             </button>
             {filas.length > 0 && (
@@ -336,7 +362,7 @@ export default function Home() {
 
         {mostrarGrafico && (
           <div className="card">
-            <h3>Dashboard: Presupuesto vs. Ejecución ({simbolo})</h3>
+            <h3>Dashboard: Presupuesto vs. Ejecución en {simbolo} (Top 10)</h3>
             <ResponsiveContainer width="100%" height={340}>
               <BarChart data={grafico}>
                 <CartesianGrid strokeDasharray="3 3" />
@@ -351,51 +377,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* Modal / Panel de Drill-Down al hacer clic en una fila */}
-        {detalleSeleccionado && (
-          <div className="card" style={{ borderLeft: "4px solid #f59e0b", background: "#fffbeb" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <h3 style={{ margin: 0 }}>🔍 Detalle de comprobantes: {detalleSeleccionado}</h3>
-              <button className="sec" onClick={() => setDetalleSeleccionado(null)}>Cerrar detalle ✕</button>
-            </div>
-            {cargandoDetalle ? (
-              <p>Cargando comprobantes...</p>
-            ) : filasDetalle.length > 0 ? (
-              <div className="tabla" style={{ maxHeight: 280, overflowY: "auto" }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>FECHA</th>
-                      <th>FINANCIADOR</th>
-                      <th>REGIÓN</th>
-                      <th>GLOSA / REFERENCIA</th>
-                      <th className="num">MONTO ({simbolo})</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filasDetalle.map((d, idx) => (
-                      <tr key={idx}>
-                        <td>{d.fecha}</td>
-                        <td>{d.financiador}</td>
-                        <td>{d.region}</td>
-                        <td>{d.glosa}</td>
-                        <td className="num">{fmt(d.monto)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p>Esta partida tiene presupuesto asignado pero aún no registra movimientos ejecutados.</p>
-            )}
-          </div>
-        )}
-
         {filas.length > 0 ? (
           <div className="card tabla">
             {reporte !== "Detalle de movimientos" && (
-              <p style={{ fontSize: 12, color: "#64748b", marginTop: 0 }}>
-                💡 Haz clic sobre cualquier fila para desplegar sus comprobantes y glosas individuales.
+              <p style={{ fontSize: 12, color: "#475569", marginBottom: 8 }}>
+                💡 Haz clic en cualquier fila para desplegar los comprobantes y movimientos individuales que la componen.
               </p>
             )}
             <table>
@@ -410,29 +396,72 @@ export default function Home() {
               </thead>
               <tbody>
                 {filas.map((f, i) => (
-                  <tr
-                    key={i}
-                    onClick={() => abrirDetalle(f)}
-                    style={{ cursor: reporte !== "Detalle de movimientos" ? "pointer" : "default" }}
-                    title={reporte !== "Detalle de movimientos" ? "Clic para ver detalle de movimientos" : ""}
-                  >
-                    {columnas.map((c) => (
-                      <td key={c} className={columnasNumericas.includes(c) ? "num" : ""}>
-                        {columnasNumericas.includes(c)
-                          ? c === "porcentaje"
-                            ? `${Number(f[c]).toFixed(2)}%`
-                            : fmt(f[c])
-                          : f[c]}
-                      </td>
-                    ))}
-                  </tr>
+                  <>
+                    <tr
+                      key={i}
+                      onClick={() => abrirDetalleFila(f, i)}
+                      style={{
+                        cursor: reporte !== "Detalle de movimientos" ? "pointer" : "default",
+                        background: filaSeleccionada === i ? "#eff6ff" : undefined,
+                      }}
+                    >
+                      {columnas.map((c) => (
+                        <td key={c} className={columnasNumericas.includes(c) ? "num" : ""}>
+                          {columnasNumericas.includes(c)
+                            ? c === "porcentaje"
+                              ? `${Number(f[c]).toFixed(2)}%`
+                              : fmt(f[c])
+                            : f[c]}
+                        </td>
+                      ))}
+                    </tr>
+                    {filaSeleccionada === i && (
+                      <tr>
+                        <td colSpan={columnas.length} style={{ background: "#f8fafc", padding: 14 }}>
+                          <strong>Comprobantes detallados ({simbolo}):</strong>
+                          {cargandoDetalle ? (
+                            <p>Cargando movimientos...</p>
+                          ) : detalleMovs.length > 0 ? (
+                            <table style={{ marginTop: 8, fontSize: 12 }}>
+                              <thead>
+                                <tr>
+                                  <th>Fecha</th>
+                                  <th>Financiador</th>
+                                  <th>Región</th>
+                                  <th>Área</th>
+                                  <th>Cuenta</th>
+                                  <th>Glosa / Referencia</th>
+                                  <th className="num">Monto ({simbolo})</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {detalleMovs.map((m, idx) => (
+                                  <tr key={idx}>
+                                    <td>{m.fecha}</td>
+                                    <td>{m.financiador}</td>
+                                    <td>{m.region}</td>
+                                    <td>{m.area}</td>
+                                    <td>{m.cuenta}</td>
+                                    <td>{m.glosa}</td>
+                                    <td className="num">{fmt(m.monto)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <p style={{ color: "#64748b", marginTop: 6 }}>No hay movimientos ejecutados en esta fila (solo presupuesto inicial).</p>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </>
                 ))}
               </tbody>
             </table>
           </div>
         ) : (
           <div className="card" style={{ textAlign: "center", color: "#64748b" }}>
-            No hay registros cargados aún para mostrar.
+            No hay registros cargados aún para mostrar. Un administrador debe importar la base contable desde el botón superior derecho.
           </div>
         )}
       </div>

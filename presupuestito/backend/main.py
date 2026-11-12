@@ -1,28 +1,19 @@
-import os
-import io
-from datetime import datetime, timedelta
-import jwt
-import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import create_engine, text
+import pandas as pd
+import io
+import jwt
+from datetime import datetime, timedelta
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg://postgres:Kantati@localhost:5432/control_presupuestario"
-)
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
-elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
-
+DATABASE_URL = "postgresql+psycopg://postgres:Kantati@localhost:5432/control_presupuestario"
 engine = create_engine(DATABASE_URL)
-SECRET_KEY = os.getenv("SECRET_KEY", "hackathon_exb_secreto")
+SECRET_KEY = "hackathon_exb_secreto"
 TASA_USD = 6.96
 
 app = FastAPI(title="API Control Presupuestario EXB")
@@ -149,16 +140,74 @@ def vaciar_base(admin: dict = Depends(verificar_admin)):
         conn.execute(text("TRUNCATE TABLE movimientos, presupuestos, modificaciones, importaciones RESTART IDENTITY CASCADE"))
     return {"ok": True}
 
-@app.get("/api/reportes")
-def generar_reporte(
-    agrupar: str = "rubro",
-    gestion: str = None,
-    financiador: str = None,
-    region: str = None,
-    area: str = None,
+@app.get("/api/auditoria")
+def listar_importaciones():
+    sql = """
+        SELECT i.id, i.nombre_archivo, i.gestion, i.filas_procesadas, i.estado,
+               TO_CHAR(i.fecha_importacion, 'DD/MM/YYYY HH24:MI') AS fecha,
+               COALESCE(u.nombre, 'Administrador') AS usuario
+        FROM importaciones i
+        LEFT JOIN usuarios u ON i.usuario_id = u.id
+        ORDER BY i.fecha_importacion DESC
+        LIMIT 20
+    """
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(sql)).mappings().all()]
+
+@app.get("/api/detalle")
+def detalle_fila(
+    rubro: str = None, cuenta: str = None, financiador: str = None,
+    area: str = None, region: str = None, mes: int = None, gestion: int = None,
     moneda: str = "BOB"
 ):
-    divisor = TASA_USD if moneda.upper() == "USD" else 1.0
+    factor = (1.0 / TASA_USD) if moneda == "USD" else 1.0
+    conds, params = [], {"factor": factor}
+    if rubro:
+        conds.append("ru.nombre = :rubro")
+        params["rubro"] = rubro
+    if cuenta:
+        conds.append("cu.nombre = :cuenta")
+        params["cuenta"] = cuenta
+    if financiador:
+        conds.append("fi.nombre = :financiador")
+        params["financiador"] = financiador
+    if area:
+        conds.append("ar.nombre = :area")
+        params["area"] = area
+    if region:
+        conds.append("re.nombre = :region")
+        params["region"] = region
+    if mes:
+        conds.append("m.mes = :mes")
+        params["mes"] = int(mes)
+    if gestion:
+        conds.append("m.gestion = :gestion")
+        params["gestion"] = int(gestion)
+
+    where_sql = ("WHERE " + " AND ".join(conds)) if conds else ""
+    sql = f"""
+        SELECT m.fecha::text AS fecha, fi.nombre AS financiador, re.nombre AS region,
+               ar.nombre AS area, cu.nombre AS cuenta, m.glosa,
+               ROUND((m.monto * :factor)::numeric, 2) AS monto
+        FROM movimientos m
+        LEFT JOIN financiadores fi ON m.financiador_id = fi.id
+        LEFT JOIN regiones re ON m.region_id = re.id
+        LEFT JOIN areas ar ON m.area_id = ar.id
+        LEFT JOIN rubros ru ON m.rubro_id = ru.id
+        LEFT JOIN cuentas cu ON m.cuenta_id = cu.id
+        {where_sql}
+        ORDER BY m.fecha DESC
+        LIMIT 100
+    """
+    with engine.connect() as conn:
+        return [dict(r) for r in conn.execute(text(sql), params).mappings().all()]
+
+@app.get("/api/reportes")
+def generar_reporte(
+    agrupar: str = "rubro", gestion: str = None, financiador: str = None,
+    region: str = None, area: str = None, moneda: str = "BOB"
+):
+    factor = (1.0 / TASA_USD) if moneda == "USD" else 1.0
     campos_map = {
         "rubro": "ru.nombre AS rubro",
         "cuenta": "cu.nombre AS cuenta",
@@ -166,7 +215,7 @@ def generar_reporte(
         "area": "ar.nombre AS area",
         "region": "re.nombre AS region",
         "mes": "m.mes AS mes",
-        "gestion": "COALESCE(m.gestion, p.gestion) AS gestion",
+        "gestion": "u.gestion AS gestion",
         "fecha": "m.fecha::text AS fecha",
         "glosa": "m.glosa AS glosa"
     }
@@ -174,7 +223,7 @@ def generar_reporte(
     select_cols = ", ".join([campos_map[c] for c in cols_req])
     group_cols = ", ".join([campos_map[c].split(" AS ")[0] for c in cols_req])
 
-    filtros_p, filtros_m, params = [], [], {"div": divisor}
+    filtros_p, filtros_m, params = [], [], {"factor": factor}
     if gestion:
         filtros_p.append("p.gestion = :gestion")
         filtros_m.append("m.gestion = :gestion")
@@ -197,7 +246,7 @@ def generar_reporte(
 
     if "fecha" in cols_req or "glosa" in cols_req:
         sql = f"""
-            SELECT {select_cols}, ROUND(m.monto / :div, 2) AS ejecutado
+            SELECT {select_cols}, ROUND((m.monto * :factor)::numeric, 2) AS ejecutado
             FROM movimientos m
             LEFT JOIN financiadores fi ON m.financiador_id = fi.id
             LEFT JOIN regiones re ON m.region_id = re.id
@@ -211,7 +260,7 @@ def generar_reporte(
         sql = f"""
             SELECT m.mes,
                    0::numeric AS presupuesto,
-                   ROUND(COALESCE(SUM(m.monto), 0) / :div, 2) AS ejecutado,
+                   ROUND((COALESCE(SUM(m.monto), 0) * :factor)::numeric, 2) AS ejecutado,
                    0::numeric AS saldo,
                    0::numeric AS porcentaje
             FROM movimientos m
@@ -258,9 +307,9 @@ def generar_reporte(
                  AND p.region_id = m.region_id AND p.area_id = m.area_id AND p.cuenta_id = m.cuenta_id
             )
             SELECT {select_cols},
-                   ROUND(SUM(u.ptto) / :div, 2) AS presupuesto,
-                   ROUND(SUM(u.ejec) / :div, 2) AS ejecutado,
-                   ROUND((SUM(u.ptto) - SUM(u.ejec)) / :div, 2) AS saldo,
+                   ROUND((SUM(u.ptto) * :factor)::numeric, 2) AS presupuesto,
+                   ROUND((SUM(u.ejec) * :factor)::numeric, 2) AS ejecutado,
+                   ROUND(((SUM(u.ptto) - SUM(u.ejec)) * :factor)::numeric, 2) AS saldo,
                    CASE WHEN SUM(u.ptto) > 0 THEN ROUND((SUM(u.ejec) / SUM(u.ptto)) * 100, 2) ELSE 0 END AS porcentaje
             FROM unido u
             LEFT JOIN financiadores fi ON u.financiador_id = fi.id
@@ -276,74 +325,11 @@ def generar_reporte(
         rows = conn.execute(text(sql), params).mappings().all()
         return [dict(r) for r in rows]
 
-@app.get("/api/detalle")
-def detalle_drilldown(
-    rubro: str = None,
-    cuenta: str = None,
-    financiador: str = None,
-    region: str = None,
-    area: str = None,
-    mes: str = None,
-    gestion: str = None,
-    moneda: str = "BOB"
-):
-    divisor = TASA_USD if moneda.upper() == "USD" else 1.0
-    conds, params = [], {"div": divisor}
-    if rubro:
-        conds.append("ru.nombre = :rubro")
-        params["rubro"] = rubro
-    if cuenta:
-        conds.append("cu.nombre = :cuenta")
-        params["cuenta"] = cuenta
-    if financiador:
-        conds.append("fi.nombre = :financiador")
-        params["financiador"] = financiador
-    if region:
-        conds.append("re.nombre = :region")
-        params["region"] = region
-    if area:
-        conds.append("ar.nombre = :area")
-        params["area"] = area
-    if mes:
-        conds.append("m.mes = :mes")
-        params["mes"] = int(mes)
-    if gestion:
-        conds.append("m.gestion = :gestion")
-        params["gestion"] = int(gestion)
-
-    where_sql = ("WHERE " + " AND ".join(conds)) if conds else ""
-    sql = f"""
-        SELECT m.fecha::text AS fecha,
-               fi.nombre AS financiador,
-               re.nombre AS region,
-               ar.nombre AS area,
-               ru.nombre AS rubro,
-               cu.nombre AS cuenta,
-               m.glosa,
-               ROUND(m.monto / :div, 2) AS monto
-        FROM movimientos m
-        LEFT JOIN financiadores fi ON m.financiador_id = fi.id
-        LEFT JOIN regiones re ON m.region_id = re.id
-        LEFT JOIN areas ar ON m.area_id = ar.id
-        LEFT JOIN rubros ru ON m.rubro_id = ru.id
-        LEFT JOIN cuentas cu ON m.cuenta_id = cu.id
-        {where_sql}
-        ORDER BY m.fecha DESC
-        LIMIT 200
-    """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-        return [dict(r) for r in rows]
-
 @app.get("/api/reportes/pdf")
 def descargar_pdf(
-    titulo: str = "Reporte Presupuestario",
-    agrupar: str = "rubro",
-    gestion: str = None,
-    financiador: str = None,
-    region: str = None,
-    area: str = None,
-    moneda: str = "BOB"
+    titulo: str = "Reporte Presupuestario", agrupar: str = "rubro",
+    gestion: str = None, financiador: str = None, region: str = None,
+    area: str = None, moneda: str = "BOB"
 ):
     datos = generar_reporte(agrupar, gestion, financiador, region, area, moneda)
     buffer = io.BytesIO()
